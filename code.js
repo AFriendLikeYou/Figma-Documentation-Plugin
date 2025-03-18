@@ -166,8 +166,8 @@ figma.showUI(
   
     <div class="tab-content active" id="clipboard-tab">
       <p class="info-text">
-        This plugin will export any elements named "Image" (frames, autolayout, shapes, etc.), 
-        "Headlines", and "Sublines" from the selected frames into MDX-compatible format.
+        This plugin will export any elements named "Image", "Headlines", "Sublines", "Alert" elements, 
+        and "DoDontGroup" patterns from the selected frames into MDX-compatible format.
       </p>
       
       <button id="export-clipboard-button" class="export-button" disabled>Export MDX</button>
@@ -505,18 +505,6 @@ figma.showUI(
     }
   }
   
-  // Helper function to determine heading level based on font size
-  // function getHeadingLevel(fontSize) {
-  //   // These thresholds can be adjusted based on your design system
-  //   if (fontSize >= 32) {
-  //     return 1 // H1
-  //   } else if (fontSize >= 24) {
-  //     return 2 // H2
-  //   } else {
-  //     return 3 // H3
-  //   }
-  // }
-  
   // Process a single frame and extract its content
   async function processFrame(frame) {
     const frameData = {
@@ -524,6 +512,8 @@ figma.showUI(
       images: [],
       headlines: [],
       sublines: [],
+      alerts: [], // Add alerts array to store alert elements
+      doDontGroups: [], // Add doDontGroups array to store Do/Don't patterns
       elements: [], // Initialize the elements array to track the order
     }
   
@@ -573,6 +563,93 @@ figma.showUI(
           figma.notify(`Failed to export ${node.type} named "Image": ${error.message}`, { error: true })
           // Continue with other nodes even if this one fails
         }
+      } else if (node.name === "DoDontGroup") {
+        // Process DoDontGroup elements
+        let doElement = null;
+        let dontElement = null;
+        
+        // Find the Do and Dont elements within the group
+        if ("children" in node) {
+          for (const child of node.children) {
+            if (child.name === "Do") {
+              doElement = child;
+            } else if (child.name === "Dont") {
+              dontElement = child;
+            }
+          }
+        }
+        
+        // Only process if we found both Do and Dont elements
+        if (doElement && dontElement) {
+          // Process Do element
+          const doData = await processDoDontElement(doElement, "do");
+          
+          // Process Dont element
+          const dontData = await processDoDontElement(dontElement, "dont");
+          
+          // Add the DoDontGroup to the doDontGroups array
+          const doDontIndex = frameData.doDontGroups.length;
+          frameData.doDontGroups.push({
+            do: doData,
+            dont: dontData,
+            id: node.id
+          });
+          
+          // Add the DoDontGroup to the elements array
+          frameData.elements.push({
+            type: "doDontGroup",
+            id: node.id,
+            y: node.y,
+            absolutePosition: node.absoluteTransform[1][2],
+            doDontIndex: doDontIndex
+          });
+          
+          figma.notify(`Exported DoDontGroup with Do and Dont elements`);
+        }
+      } else if (node.name.includes("Alert")) {
+        // Process Alert elements
+        // Determine the alert type based on the name
+        let alertType = "Default";
+        if (node.name.includes("Warning")) {
+          alertType = "Warning";
+        }
+        
+        // Get text content from child text nodes
+        let headline = "";
+        let subline = "";
+        
+        if ("children" in node) {
+          for (const child of node.children) {
+            if (child.type === "TEXT") {
+              if (child.name.toLowerCase().includes("headline")) {
+                headline = child.characters;
+              } else if (child.name.toLowerCase().includes("subline")) {
+                subline = child.characters;
+              }
+            }
+          }
+        }
+        
+        // Add the alert to the alerts array
+        const alertIndex = frameData.alerts.length;
+        frameData.alerts.push({
+          type: alertType,
+          headline: headline,
+          subline: subline,
+          id: node.id
+        });
+        
+        // Add the alert to the elements array
+        frameData.elements.push({
+          type: "alert",
+          id: node.id,
+          y: node.y,
+          absolutePosition: node.absoluteTransform[1][2],
+          alertIndex: alertIndex,
+          alertType: alertType
+        });
+        
+        figma.notify(`Exported Alert (${alertType}): "${headline.substring(0, 20)}${headline.length > 20 ? "..." : ""}"`)
       } else if (node.type === "TEXT") {
         // More flexible headline detection - check if the name contains "headline" or "Headline" or is exactly "Headlines"
         if (node.name.toLowerCase().includes("headline") || node.name === "Headlines") {
@@ -631,6 +708,71 @@ figma.showUI(
         }
       }
     }
+    
+    // Helper function to process Do and Dont elements
+    async function processDoDontElement(element, type) {
+      let title = "";
+      let text = "";
+      let imageData = null;
+      let imageNode = null;
+      
+      // Extract title, text, and image from the element
+      if ("children" in element) {
+        for (const child of element.children) {
+          if (child.type === "TEXT") {
+            if (child.name.toLowerCase().includes("title")) {
+              title = child.characters;
+            } else if (child.name.toLowerCase().includes("text")) {
+              text = child.characters;
+            }
+          } else if (child.name === "Image" || child.type === "RECTANGLE" || child.type === "FRAME") {
+            // This could be an image
+            imageNode = child;
+          }
+        }
+      }
+      
+      // Export the image if found
+      if (imageNode) {
+        try {
+          const imageBytes = await imageNode.exportAsync({
+            format: "PNG",
+            constraint: { type: "SCALE", value: 2 },
+          });
+          
+          // Create a unique name for the image
+          const imageName = `${frame.name.toLowerCase().replace(/\s+/g, "-")}-${type}-${frameData.images.length}.png`;
+          
+          // Store the image data
+          imageData = {
+            name: imageName,
+            data: imageBytes,
+            width: imageNode.width,
+            height: imageNode.height,
+            index: frameData.images.length
+          };
+          
+          // Add to the images array
+          frameData.images.push({
+            name: imageName,
+            data: imageBytes,
+            width: imageNode.width,
+            height: imageNode.height,
+            frameName: frame.name,
+            index: frameData.images.length,
+            nodeType: imageNode.type
+          });
+        } catch (error) {
+          console.error(`Failed to export image for ${type}: ${error.message}`);
+        }
+      }
+      
+      return {
+        title: title,
+        text: text,
+        image: imageData
+      };
+    }
   
     // Start traversal from the frame
     await traverseNode(frame)
@@ -650,6 +792,8 @@ figma.showUI(
       console.log(`  Headlines: ${frame.headlines.length}`)
       console.log(`  Sublines: ${frame.sublines.length}`)
       console.log(`  Images: ${frame.images.length}`)
+      console.log(`  Alerts: ${frame.alerts.length}`)
+      console.log(`  DoDontGroups: ${frame.doDontGroups.length}`) // Add DoDontGroups debugging
       console.log(`  Elements in order: ${frame.elements.length}`)
   
       frame.elements.forEach((element, elementIndex) => {
@@ -664,6 +808,13 @@ figma.showUI(
           console.log(`      Text: "${element.text.substring(0, 30)}${element.text.length > 30 ? "..." : ""}"`)
         } else if (element.type === "image") {
           console.log(`      Image index: ${element.imageIndex}`)
+        } else if (element.type === "alert") {
+          console.log(`      Alert type: ${element.alertType}, index: ${element.alertIndex}`)
+        } else if (element.type === "doDontGroup") {
+          console.log(`      DoDontGroup index: ${element.doDontIndex}`)
+          const doDontGroup = frame.doDontGroups[element.doDontIndex];
+          console.log(`        Do: ${doDontGroup.do.title} (has image: ${!!doDontGroup.do.image})`)
+          console.log(`        Dont: ${doDontGroup.dont.title} (has image: ${!!doDontGroup.dont.image})`)
         }
       })
     })
@@ -690,10 +841,94 @@ figma.showUI(
         } else if (element.type === "image") {
           const image = frame.images[element.imageIndex]
           mdxOutput += `<Image src="/images/${image.name}" width={${element.width}} height={${element.height}} alt="Image from ${frame.name}" />\n\n`
+        } else if (element.type === "alert") {
+          // Add alert code blocks
+          const alert = frame.alerts[element.alertIndex]
+          mdxOutput += `\`\`\`jsx
+<Alert variant="${element.alertType.toLowerCase()}">
+  <AlertTitle>${alert.headline}</AlertTitle>
+  <AlertDescription>${alert.subline}</AlertDescription>
+</Alert>
+\`\`\`\n\n`
+        } else if (element.type === "doDontGroup") {
+          // Add DoDontGroup code blocks
+          const doDontGroup = frame.doDontGroups[element.doDontIndex];
+          const doItem = doDontGroup.do;
+          const dontItem = doDontGroup.dont;
+          
+          // Generate the DoDontGroup code block
+          mdxOutput += `\`\`\`jsx
+<DoDontGroup>
+  <Do>
+    ${doItem.image ? `<Image src="/images/${doItem.image.name}" width={${doItem.image.width}} height={${doItem.image.height}} alt="Do: ${doItem.title}" />` : ''}
+    <DoTitle>${doItem.title}</DoTitle>
+    <DoText>${doItem.text}</DoText>
+  </Do>
+  <Dont>
+    ${dontItem.image ? `<Image src="/images/${dontItem.image.name}" width={${dontItem.image.width}} height={${dontItem.image.height}} alt="Don't: ${dontItem.title}" />` : ''}
+    <DontTitle>${dontItem.title}</DontTitle>
+    <DontText>${dontItem.text}</DontText>
+  </Dont>
+</DoDontGroup>
+\`\`\`\n\n`
         }
       })
   
       mdxOutput += "---\n\n"
+    })
+  
+    return mdxOutput
+  }
+  
+  // Generate MDX for a single frame
+  function generateSingleFrameMDXOutput(frameData) {
+    let mdxOutput = ""
+  
+    // Process elements in the order they appear in the frame
+    frameData.elements.forEach((element) => {
+      if (element.type === "headline") {
+        // Use the appropriate heading level
+        const headingMarker = "#".repeat(element.headingLevel)
+        mdxOutput += `${headingMarker} ${element.text}\n\n`
+      } else if (element.type === "subline") {
+        // Use regular paragraph text for sublines
+        mdxOutput += `${element.text}\n\n`
+      } else if (element.type === "image") {
+        const image = frameData.images[element.imageIndex]
+        mdxOutput += `<Image src="/images/${image.name}" width={${element.width}} height={${element.height}} alt="Image from ${frameData.name}" />\n\n`
+      } else if (element.type === "alert") {
+        // Add alert code blocks
+        const alert = frameData.alerts[element.alertIndex]
+        
+        // Generate the alert code block based on type
+        mdxOutput += `\`\`\`jsx
+<Alert variant="${element.alertType.toLowerCase()}">
+  <AlertTitle>${alert.headline}</AlertTitle>
+  <AlertDescription>${alert.subline}</AlertDescription>
+</Alert>
+\`\`\`\n\n`
+      } else if (element.type === "doDontGroup") {
+        // Add DoDontGroup code blocks
+        const doDontGroup = frameData.doDontGroups[element.doDontIndex];
+        const doItem = doDontGroup.do;
+        const dontItem = doDontGroup.dont;
+        
+        // Generate the DoDontGroup code block
+        mdxOutput += `\`\`\`jsx
+<DoDontGroup>
+  <Do>
+    ${doItem.image ? `<Image src="/images/${doItem.image.name}" width={${doItem.image.width}} height={${doItem.image.height}} alt="Do: ${doItem.title}" />` : ''}
+    <DoTitle>${doItem.title}</DoTitle>
+    <DoText>${doItem.text}</DoText>
+  </Do>
+  <Dont>
+    ${dontItem.image ? `<Image src="/images/${dontItem.image.name}" width={${dontItem.image.width}} height={${dontItem.image.height}} alt="Don't: ${dontItem.title}" />` : ''}
+    <DontTitle>${dontItem.title}</DontTitle>
+    <DontText>${dontItem.text}</DontText>
+  </Dont>
+</DoDontGroup>
+\`\`\`\n\n`
+      }
     })
   
     return mdxOutput
@@ -782,28 +1017,6 @@ figma.showUI(
         error: error.message,
       })
     }
-  }
-  
-  // Generate MDX for a single frame
-  function generateSingleFrameMDXOutput(frameData) {
-    let mdxOutput = ""
-  
-    // Process elements in the order they appear in the frame
-    frameData.elements.forEach((element) => {
-      if (element.type === "headline") {
-        // Use the appropriate heading level
-        const headingMarker = "#".repeat(element.headingLevel)
-        mdxOutput += `${headingMarker} ${element.text}\n\n`
-      } else if (element.type === "subline") {
-        // Use regular paragraph text for sublines
-        mdxOutput += `${element.text}\n\n`
-      } else if (element.type === "image") {
-        const image = frameData.images[element.imageIndex]
-        mdxOutput += `<Image src="/images/${image.name}" width={${element.width}} height={${element.height}} alt="Image from ${frameData.name}" />\n\n`
-      }
-    })
-  
-    return mdxOutput
   }
   
   // Upload content to GitHub
@@ -1090,5 +1303,3 @@ figma.showUI(
       figma.ui.resize(msg.width, msg.height)
     }
   }
-  
-  
